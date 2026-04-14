@@ -65,12 +65,23 @@ def mapper(src: Path, dest: Path, **params) -> Path | None:
 
 ## `watch_mode`
 
-| 值 | 顆粒度 | 函式拿到的 `src` |
-|---|---|---|
-| `"file"`(預設) | 每個**檔案**(目錄事件會被 engine 直接擋掉,不會進 mapper) | 一定是檔案路徑 |
-| `"dir:N"` | source 底下第 N 層的目錄 | 該目錄路徑 |
-| `"glob:<pat>"` | 符合 glob 的 path | 符合的 path |
-| `"custom"` | 全部事件都送 | 原 path(自己判斷是檔案或目錄) |
+| 值 | 顆粒度 | 函式拿到的 `src` | 子事件冒泡 | 自動 debounce |
+|---|---|---|---|---|
+| `"file"`(預設) | 每個**檔案** | 一定是檔案路徑 | — | 否 |
+| `"dir:N"` | source 底下第 N 層的目錄 | 該目錄路徑 | ✓(第 N 層祖先) | ✓ |
+| `"regex:<pat>"` | 任意深度、name 符合 regex 的目錄 | 該目錄路徑 | ✓(最近的匹配祖先) | ✓ |
+| `"glob:<pat>"` | 符合 glob 的 path | 符合的 path | ✗ | 否 |
+| `"custom"` | 全部事件都送 | 原 path(自己判斷) | ✗ | 否 |
+
+**子事件冒泡** = 當單位目錄裡的子檔案變動,engine 會自動把事件對應回單位本身(重新 hash 整包)。  
+**自動 debounce** = 多個事件在 `debounce_seconds`(預設 0.5 秒)內會被合併成一次 ingest,適合目錄內容分批寫入的情境。
+
+### 什麼時候用哪個
+
+- 要監聽**固定深度**的目錄 → `dir:N`
+- 要監聽**任意深度、名字符合某格式**的目錄(例如 `XXXX-YYYYMMDD-HHMMSS`)→ `regex:<pat>`
+- 要過濾個別檔案 → `glob:<pat>` 或 `file` + mapper 內判斷
+- 極端 case、框架語意都不對 → `custom`(自己扛)
 
 ---
 
@@ -157,6 +168,22 @@ def batches_only(src, dest, *, include="batch_*", **_):
         return None
     return dest / src.name
 ```
+
+### 任意深度、名字符合某 pattern 的目錄
+
+用 `regex:` 模式處理「埋在不確定深度的路徑裡、但名字有固定格式」的同步單位:
+
+```python
+@algorithm(
+    "sendout_flatten",
+    watch_mode=r"regex:^[A-Za-z0-9]+-\d{8}-\d{6}$",
+    revision=1,
+)
+def sendout_flatten(src, dest, **_):
+    return dest / src.name
+```
+
+配合 YAML 的 `debounce_seconds` 可以處理「目錄內容分批寫入」的情況 —— 多個子檔案事件會 coalesce 成一次 ingest,避免抓到半成品。參考完整範例:[../examples/sendout_flatten.py](../examples/sendout_flatten.py)、[../examples/watch.sendout.example.yaml](../examples/watch.sendout.example.yaml)。
 
 ---
 

@@ -43,6 +43,7 @@ def _build_watches(cfg: AppConfig, reg: Registry, db: Database) -> list[Watch]:
                 params=dict(w.params),
                 store=store,
                 policy=w.policy,
+                debounce_seconds=w.debounce_seconds,
             )
         )
     return watches

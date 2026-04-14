@@ -136,6 +136,7 @@ watches:
 | `log_level` | Python logging 等級,字串 |
 | `on_conflict` / `on_change` / `on_delete` | 同步 policy(見[同步 Policy](#同步-policy));可寫在頂層當預設、也可寫在 `watches[]` 覆蓋 |
 | `duplicate_dir` / `archive_dir` | 撞名備份與封存的子資料夾名(預設 `duplicate` / `archive`) |
+| `debounce_seconds` | `dir:N` / `regex:` 模式下事件合併視窗(秒),預設 `0.5`。目錄內容分批寫入時調大可避免抓到半成品。頂層或 watch 都可寫。 |
 | `watches[].name` | watch 的唯一識別字,會出現在 log、DB 裡 |
 | `watches[].algorithm` | 要用的演算法名稱(對應 mapper 的 `@algorithm("...")` 名字) |
 | `watches[].source` | 監聽的來源目錄,必須已存在 |

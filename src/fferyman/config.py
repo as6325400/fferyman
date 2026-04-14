@@ -20,6 +20,7 @@ class WatchSpec:
     dest: Path
     params: dict[str, Any] = field(default_factory=dict)
     policy: Policy = field(default_factory=Policy)
+    debounce_seconds: float = 0.5
 
 
 @dataclass
@@ -40,6 +41,7 @@ def load(config_path: Path) -> AppConfig:
 
     # Top-level defaults (optional). Watch-level fields override.
     top_defaults = {k: raw[k] for k in _POLICY_KEYS if k in raw}
+    top_debounce = raw.get("debounce_seconds")
 
     watches: list[WatchSpec] = []
     seen: set[str] = set()
@@ -60,6 +62,18 @@ def load(config_path: Path) -> AppConfig:
         except ValueError as e:
             raise ValueError(f"watches[{i}] ({name}): {e}") from None
 
+        raw_debounce = w.get("debounce_seconds", top_debounce if top_debounce is not None else 0.5)
+        try:
+            debounce_seconds = float(raw_debounce)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"watches[{i}] ({name}): debounce_seconds must be a number, got {raw_debounce!r}"
+            ) from None
+        if debounce_seconds < 0:
+            raise ValueError(
+                f"watches[{i}] ({name}): debounce_seconds must be >= 0, got {debounce_seconds}"
+            )
+
         watches.append(
             WatchSpec(
                 name=name,
@@ -68,6 +82,7 @@ def load(config_path: Path) -> AppConfig:
                 dest=Path(w["dest"]).expanduser(),
                 params=dict(w.get("params") or {}),
                 policy=watch_policy,
+                debounce_seconds=debounce_seconds,
             )
         )
 

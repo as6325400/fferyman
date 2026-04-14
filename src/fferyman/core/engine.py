@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import re
 import shutil
 import threading
 from dataclasses import dataclass, field
@@ -22,9 +23,10 @@ log = logging.getLogger("fferyman.engine")
 
 @dataclass
 class _ParsedMode:
-    kind: str                  # "file" | "dir" | "glob" | "custom"
+    kind: str                         # "file" | "dir" | "glob" | "regex" | "custom"
     depth: int | None = None
     glob: str | None = None
+    regex: "re.Pattern[str] | None" = None
 
 
 def parse_watch_mode(mode: str) -> _ParsedMode:
@@ -36,6 +38,13 @@ def parse_watch_mode(mode: str) -> _ParsedMode:
         return _ParsedMode(kind="dir", depth=int(mode.split(":", 1)[1]))
     if mode.startswith("glob:"):
         return _ParsedMode(kind="glob", glob=mode.split(":", 1)[1])
+    if mode.startswith("regex:"):
+        pat = mode.split(":", 1)[1]
+        try:
+            compiled = re.compile(pat)
+        except re.error as e:
+            raise ValueError(f"invalid regex in watch_mode {mode!r}: {e}") from None
+        return _ParsedMode(kind="regex", regex=compiled)
     raise ValueError(f"unknown watch_mode {mode!r}")
 
 
@@ -68,6 +77,24 @@ def _unit_root_for(
         if len(parts) < depth:
             return None
         return source.joinpath(*parts[:depth])
+    if parsed.kind == "regex":
+        assert parsed.regex is not None
+        # Walk up from `path` until we find a **directory** ancestor whose
+        # basename matches, stopping at `source`. Child events inside a
+        # matched dir therefore bubble up to the dir itself. A file whose
+        # name happens to match is NOT treated as a unit (regex mode is
+        # directory-only per the docs).
+        current = path
+        current_is_dir = is_dir
+        while current != source:
+            if current_is_dir and parsed.regex.fullmatch(current.name):
+                return current
+            parent = current.parent
+            if parent == current:
+                return None  # reached filesystem root without hitting source
+            current = parent
+            current_is_dir = True  # parents in a filesystem are always directories
+        return None
     return None
 
 
@@ -104,6 +131,25 @@ def iter_units(source: Path, mode: str) -> Iterator[Path]:
     if parsed.kind == "custom":
         for p in sorted(source.rglob("*")):
             yield p
+        return
+    if parsed.kind == "regex":
+        assert parsed.regex is not None
+
+        def _walk_regex(cur: Path) -> Iterator[Path]:
+            if not cur.is_dir():
+                return
+            for child in sorted(cur.iterdir()):
+                # Regex mode matches **directories only**. A file whose name
+                # also matches is skipped (and has no children to descend
+                # into either).
+                if child.is_dir() and parsed.regex.fullmatch(child.name):
+                    yield child
+                    # Don't descend into a matched unit. Nested matches are
+                    # treated as contents of the outer unit.
+                elif child.is_dir():
+                    yield from _walk_regex(child)
+
+        yield from _walk_regex(source)
         return
 
 
@@ -171,7 +217,11 @@ class Watch:
         if self.logger is None:
             self.logger = logging.getLogger(f"fferyman.{self.name}")
         self._parsed = parse_watch_mode(self.spec.watch_mode)
-        if self._parsed.kind == "dir":
+        # Debouncer is needed whenever a unit can receive multiple raw events
+        # during a single logical change (directory fill-in). "dir:N" and
+        # "regex:" both fit that pattern; "file"/"custom"/"glob" dispatch per
+        # raw event and don't need coalescing.
+        if self._parsed.kind in ("dir", "regex"):
             self._debouncer = _Debouncer(self.debounce_seconds, self.dispatch)
 
     # ---- identity / fingerprint ----
