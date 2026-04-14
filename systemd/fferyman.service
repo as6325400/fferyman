@@ -1,0 +1,16 @@
+[Unit]
+Description=fferyman mirror daemon
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python -m fferyman run --config /etc/fferyman/watch.yaml
+Restart=on-failure
+RestartSec=5
+User=fferyman
+ProtectSystem=strict
+ReadWritePaths=/shared /var/lib/fferyman
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

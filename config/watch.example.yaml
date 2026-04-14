@@ -1,0 +1,28 @@
+database: ./fferyman.sqlite
+plugins_dir: ./plugins
+log_level: INFO
+
+# Optional top-level defaults. Watch-level fields below override.
+on_conflict: duplicate     # overwrite | duplicate | error
+on_change:   version       # replace | version
+on_delete:   keep_dest     # delete_dest | keep_dest | archive
+duplicate_dir: duplicate
+archive_dir:   archive
+
+watches:
+  - name: interns-share
+    algorithm: flatten
+    source: /weka/A/B/C
+    dest: /shared/B
+    # Uses the top-level policy defaults above.
+
+  - name: batch-dirs
+    algorithm: mirror_matching_dirs
+    source: /weka/A/B/C
+    dest: /shared/batches
+    # Override just the fields you need:
+    on_conflict: error
+    on_delete: archive
+    params:
+      include: "batch_*"
+      exclude: "tmp_*"
