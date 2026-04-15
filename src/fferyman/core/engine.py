@@ -7,7 +7,7 @@ import shutil
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -231,11 +231,33 @@ class Watch:
 
     # ---- public API ----
 
-    def scan_once(self) -> None:
-        for unit in iter_units(self.source, self.spec.watch_mode):
+    def scan_once(
+        self,
+        wrap: Callable[[list[Path]], Iterable[Path]] | None = None,
+    ) -> None:
+        """Ingest every unit under `source`.
+
+        `wrap` is an optional function that receives the materialised list of
+        units and returns an iterable to actually iterate. Use this for
+        progress bars, e.g.:
+
+            watch.scan_once(wrap=lambda us: tqdm(us, desc=watch.name))
+
+        Passing `wrap=None` streams units without materialising the list
+        (cheaper memory, no total known).
+        """
+        if wrap is None:
+            for unit in iter_units(self.source, self.spec.watch_mode):
+                self._ingest(unit)
+            return
+        units = list(iter_units(self.source, self.spec.watch_mode))
+        for unit in wrap(units):
             self._ingest(unit)
 
-    def reconcile(self) -> None:
+    def reconcile(
+        self,
+        wrap: Callable[[list[Path]], Iterable[Path]] | None = None,
+    ) -> None:
         """Full re-sync. Call after changing policy or algorithm revision.
 
         1. Re-ingests every unit under source (mapper decides canonical target,
@@ -243,7 +265,7 @@ class Watch:
            matches are skipped).
         2. Applies on_delete to any tracked source whose file has disappeared.
         """
-        self.scan_once()
+        self.scan_once(wrap=wrap)
         for m in self.store.list_active():
             src = Path(m.source_path)
             if not src.exists():
@@ -564,14 +586,26 @@ class Engine:
         self._watches.append(watch)
         self._observer.schedule(_Handler(watch), str(watch.source), recursive=True)
 
-    def start(self) -> None:
+    def start(
+        self,
+        scan_wrap_factory: Callable[[str], Callable[[list[Path]], Iterable[Path]] | None] | None = None,
+    ) -> None:
+        """Run initial scan then start the watchdog observer.
+
+        `scan_wrap_factory(watch_name)` returns a wrap for that watch's
+        initial scan (or None to stream without progress).
+        """
         for w in self._watches:
-            w.scan_once()
+            wrap = scan_wrap_factory(w.name) if scan_wrap_factory else None
+            w.scan_once(wrap=wrap)
         self._observer.start()
         self._started = True
 
-    def run_forever(self) -> None:
-        self.start()
+    def run_forever(
+        self,
+        scan_wrap_factory: Callable[[str], Callable[[list[Path]], Iterable[Path]] | None] | None = None,
+    ) -> None:
+        self.start(scan_wrap_factory=scan_wrap_factory)
         try:
             self._observer.join()
         except KeyboardInterrupt:

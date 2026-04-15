@@ -4,11 +4,39 @@ import argparse
 import logging
 import sys
 from pathlib import Path
+from typing import Callable, Iterable
 
 from fferyman.config import AppConfig, load
 from fferyman.core.db import Database
 from fferyman.core.engine import Engine, Watch
 from fferyman.core.registry import Registry
+
+
+def _progress_factory(enabled: bool) -> Callable[[str], Callable[[list[Path]], Iterable[Path]] | None] | None:
+    """Return a factory that builds a tqdm-backed wrap for a given watch name.
+
+    Falls back to a no-op (streaming, no bar) when `enabled=False` or tqdm is
+    not installed.
+    """
+    if not enabled:
+        return None
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        print(
+            "[warn] --progress requested but `tqdm` is not installed; "
+            "install with `pip install fferyman[progress]`. Continuing "
+            "without a progress bar.",
+            file=sys.stderr,
+        )
+        return None
+
+    def factory(watch_name: str) -> Callable[[list[Path]], Iterable[Path]]:
+        def wrap(units: list[Path]) -> Iterable[Path]:
+            return tqdm(units, desc=watch_name, unit="unit")
+        return wrap
+
+    return factory
 
 
 def _setup_logging(level: str) -> None:
@@ -54,12 +82,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     _setup_logging(cfg.log_level)
     reg = _build_registry(cfg)
     db = Database(cfg.database)
+    factory = _progress_factory(getattr(args, "progress", False))
     try:
         watches = _build_watches(cfg, reg, db)
         engine = Engine()
         for w in watches:
             engine.add(w)
-        engine.run_forever()
+        engine.run_forever(scan_wrap_factory=factory)
     finally:
         db.close()
     return 0
@@ -70,9 +99,11 @@ def cmd_scan(args: argparse.Namespace) -> int:
     _setup_logging(cfg.log_level)
     reg = _build_registry(cfg)
     db = Database(cfg.database)
+    factory = _progress_factory(getattr(args, "progress", False))
     try:
         for w in _build_watches(cfg, reg, db):
-            w.scan_once()
+            wrap = factory(w.name) if factory else None
+            w.scan_once(wrap=wrap)
     finally:
         db.close()
     return 0
@@ -83,9 +114,11 @@ def cmd_reconcile(args: argparse.Namespace) -> int:
     _setup_logging(cfg.log_level)
     reg = _build_registry(cfg)
     db = Database(cfg.database)
+    factory = _progress_factory(getattr(args, "progress", False))
     try:
         for w in _build_watches(cfg, reg, db):
-            w.reconcile()
+            wrap = factory(w.name) if factory else None
+            w.reconcile(wrap=wrap)
     finally:
         db.close()
     return 0
@@ -145,6 +178,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="fferyman")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    PROGRESS_CMDS = {"run", "scan", "reconcile"}
+
     for name, handler, help_ in (
         ("run", cmd_run, "watch and mirror continuously"),
         ("scan", cmd_scan, "one-shot full scan then exit"),
@@ -154,6 +189,13 @@ def build_parser() -> argparse.ArgumentParser:
     ):
         sp = sub.add_parser(name, help=help_)
         sp.add_argument("--config", "-c", type=Path, required=True)
+        if name in PROGRESS_CMDS:
+            sp.add_argument(
+                "--progress",
+                action="store_true",
+                help="show a tqdm progress bar during initial scan "
+                "(install with `pip install fferyman[progress]`)",
+            )
         sp.set_defaults(func=handler)
     return p
 
