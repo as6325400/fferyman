@@ -28,6 +28,7 @@ Pluggable folder-mirror framework with SQLite-backed mappings.
 
 - Python **3.11+**
 - 相依套件(會自動安裝):`watchdog>=4.0`、`PyYAML>=6.0`
+- 選配:`rclone`。若系統已安裝,fferyman 會優先用它做底層 copy;否則自動 fallback 到 Python 內建複製流程
 - Linux / macOS(Windows 未測試)
 
 ## 安裝

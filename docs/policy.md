@@ -133,7 +133,7 @@ fferyman reconcile -c config.yaml
 
 ## 原子性保證
 
-- **Copy 一致性**:用 tmp 檔 + `os.replace`(檔案)或 tmp 目錄 + `os.rename`(目錄)。crash 中途不會在 dest 留下半檔。
+- **Copy 一致性**:預設優先用 `rclone copyto` 做 tmp 複製(若系統已安裝 `rclone`),否則 fallback 到 Python 內建 copy;最後仍然用 `os.replace`(檔案)或 tmp 目錄 + `os.rename`(目錄)。crash 中途不會在 dest 留下半檔。
 - **寫入順序**:先 copy 成功、再更新 DB。crash 在兩者之間,下次 scan 會偵測到 dest 已有檔但 DB 無紀錄,會根據 `on_conflict` 處理。
 - **Target safety**:mapper 若誤回 `dest` 之外或 `src` 本身的路徑,engine 會直接拒絕並 log error,不會執行 copy。
 - **`duplicate_dir` / `archive_dir` 安全驗證**:不允許絕對路徑、路徑分隔符、`..` 等會逃出 `dest` 的值;`policy_from_dict` 以及 `Policy(...)` 直接建構時都會擋下(`ValueError`)。engine 在實際使用前還會再 resolve 一次確認。
