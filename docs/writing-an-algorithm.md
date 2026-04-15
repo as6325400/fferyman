@@ -52,6 +52,8 @@ def mapper(src: Path, dest: Path, **params) -> Path | None:
 | `**params` | YAML `params:` 區塊內容,以 kwargs 傳入;框架另外會傳 `hash_` |
 | 回傳 | 目的地路徑(必須在 `dest` 底下),或 `None` 表示跳過 |
 
+`hash_` 是框架算好的真實內容 hash。即使 watch 設成 `hash_policy=copy_then_hash`,engine 也會先把第一次同步的 regular file 複製到 staging 區、算完 hash 後才呼叫 mapper,所以 hash-aware mapper 不需要自己處理 `hash_=None`。
+
 ### `revision`
 
 當你**改變 mapper 的目標選擇邏輯**(改路徑格式、改過濾條件等),把 `revision` +1。框架會把 revision 納入 fingerprint,舊紀錄自動失效,下次 scan / `reconcile` 會重新呼叫 mapper:
@@ -90,7 +92,7 @@ def mapper(src: Path, dest: Path, **params) -> Path | None:
 | 框架做的 | 不要 |
 |---|---|
 | 事件監聽 (CREATED / MODIFIED / DELETED / MOVED) | 在 mapper 裡判斷事件類型 |
-| SHA256 / Merkle hash | `hashlib` |
+| SHA256 / Merkle hash / staged copy-then-hash | `hashlib` |
 | 同 source + hash + fingerprint 已處理 → 跳過 | 自己查 DB |
 | 撞名處理(依 `on_conflict`) | `target.exists()` 然後放 `duplicate/` |
 | 內容變更處理(依 `on_change`) | 自己 mark_deleted 舊的 |

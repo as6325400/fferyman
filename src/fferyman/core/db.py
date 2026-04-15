@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS mappings (
   source_path   TEXT    NOT NULL,
   source_inode  INTEGER,
   source_mtime  REAL,
+  source_mtime_ns INTEGER,
+  source_size   INTEGER,
   content_hash  TEXT    NOT NULL,
   dest_path     TEXT    NOT NULL,
   is_duplicate  INTEGER NOT NULL DEFAULT 0,
@@ -30,6 +32,8 @@ CREATE INDEX IF NOT EXISTS ix_map_fp   ON mappings(watch_name, source_path, cont
 
 _MIGRATIONS = [
     "ALTER TABLE mappings ADD COLUMN fingerprint TEXT NOT NULL DEFAULT ''",
+    "ALTER TABLE mappings ADD COLUMN source_mtime_ns INTEGER",
+    "ALTER TABLE mappings ADD COLUMN source_size INTEGER",
 ]
 
 
@@ -41,6 +45,8 @@ class Mapping:
     source_path: str
     source_inode: int | None
     source_mtime: float | None
+    source_mtime_ns: int | None
+    source_size: int | None
     content_hash: str
     dest_path: str
     is_duplicate: bool
@@ -58,6 +64,8 @@ class Mapping:
             source_path=row["source_path"],
             source_inode=row["source_inode"],
             source_mtime=row["source_mtime"],
+            source_mtime_ns=row["source_mtime_ns"] if "source_mtime_ns" in row.keys() else None,
+            source_size=row["source_size"] if "source_size" in row.keys() else None,
             content_hash=row["content_hash"],
             dest_path=row["dest_path"],
             is_duplicate=bool(row["is_duplicate"]),
@@ -151,15 +159,17 @@ class MappingStore:
         fingerprint: str = "",
         source_inode: int | None = None,
         source_mtime: float | None = None,
+        source_mtime_ns: int | None = None,
+        source_size: int | None = None,
     ) -> Mapping:
         now = time.time()
         cur = self._exec(
             """
             INSERT INTO mappings(
                 watch_name, algorithm, source_path, source_inode, source_mtime,
-                content_hash, dest_path, is_duplicate, fingerprint,
+                source_mtime_ns, source_size, content_hash, dest_path, is_duplicate, fingerprint,
                 status, created_at, updated_at
-            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+            ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 self.watch_name,
@@ -167,6 +177,8 @@ class MappingStore:
                 source_path,
                 source_inode,
                 source_mtime,
+                source_mtime_ns,
+                source_size,
                 content_hash,
                 dest_path,
                 1 if is_duplicate else 0,
@@ -190,4 +202,32 @@ class MappingStore:
         self._exec(
             "UPDATE mappings SET fingerprint=?, updated_at=? WHERE id=?",
             (fingerprint, time.time(), mapping_id),
+        )
+
+    def refresh_source(
+        self,
+        mapping_id: int,
+        *,
+        fingerprint: str,
+        source_inode: int | None,
+        source_mtime: float | None,
+        source_mtime_ns: int | None,
+        source_size: int | None,
+    ) -> None:
+        self._exec(
+            """
+            UPDATE mappings
+            SET fingerprint=?, source_inode=?, source_mtime=?, source_mtime_ns=?,
+                source_size=?, updated_at=?
+            WHERE id=?
+            """,
+            (
+                fingerprint,
+                source_inode,
+                source_mtime,
+                source_mtime_ns,
+                source_size,
+                time.time(),
+                mapping_id,
+            ),
         )

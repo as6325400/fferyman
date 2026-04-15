@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import os
 import re
 import shutil
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator
+from uuid import uuid4
 
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
@@ -16,7 +18,7 @@ from fferyman.core.db import MappingStore
 from fferyman.core.fsops import atomic_copy_path, next_available_name
 from fferyman.core.hashing import hash_path
 from fferyman.core.mapper import MapperSpec
-from fferyman.core.policy import OnChange, OnConflict, OnDelete, Policy
+from fferyman.core.policy import HashPolicy, OnChange, OnConflict, OnDelete, Policy
 
 log = logging.getLogger("fferyman.engine")
 
@@ -27,6 +29,14 @@ class _ParsedMode:
     depth: int | None = None
     glob: str | None = None
     regex: "re.Pattern[str] | None" = None
+
+
+@dataclass(frozen=True)
+class _SourceMetadata:
+    inode: int
+    mtime: float
+    mtime_ns: int
+    size: int
 
 
 def parse_watch_mode(mode: str) -> _ParsedMode:
@@ -279,7 +289,7 @@ class Watch:
                 # the unit itself still exists, this is a modification, not a
                 # deletion of the whole unit.
                 if unit_root.exists():
-                    self._ingest(unit_root)
+                    self._ingest(unit_root, force_hash=True)
                 else:
                     self._remove(unit_root)
             elif kind == "moved":
@@ -288,12 +298,12 @@ class Watch:
                 if src_unit_root is not None and not src_unit_root.exists():
                     self._remove(src_unit_root)
                 elif src_unit_root is not None and src_unit_root != unit_root:
-                    self._ingest(src_unit_root)
+                    self._ingest(src_unit_root, force_hash=True)
                 if unit_root.exists():
-                    self._ingest(unit_root)
+                    self._ingest(unit_root, force_hash=True)
             else:  # created | modified
                 if unit_root.exists():
-                    self._ingest(unit_root)
+                    self._ingest(unit_root, force_hash=True)
         except Exception:
             log.exception("watch %s failed on %s", self.name, unit_root)
 
@@ -309,61 +319,219 @@ class Watch:
 
     # ---- core ingestion ----
 
-    def _ingest(self, src: Path) -> None:
-        if not src.exists():
-            return
+    def _read_source_metadata(self, src: Path) -> _SourceMetadata | None:
+        """Cheap change detector for regular files.
+
+        Directories still go through full content hashing because a single
+        directory stat is not enough to know whether the whole tree changed.
+        """
         try:
-            content_hash = hash_path(src)
+            if src.is_symlink() or not src.is_file():
+                return None
+            st = src.stat()
         except FileNotFoundError:
+            return None
+        return _SourceMetadata(
+            inode=st.st_ino,
+            mtime=st.st_mtime,
+            mtime_ns=st.st_mtime_ns,
+            size=st.st_size,
+        )
+
+    @staticmethod
+    def _same_source_metadata(prev, meta: _SourceMetadata) -> bool:
+        return (
+            prev.source_inode is not None
+            and prev.source_mtime_ns is not None
+            and prev.source_size is not None
+            and prev.source_inode == meta.inode
+            and prev.source_mtime_ns == meta.mtime_ns
+            and prev.source_size == meta.size
+        )
+
+    def _refresh_source_state(
+        self,
+        mapping_id: int,
+        fingerprint: str,
+        source_meta: _SourceMetadata | None,
+    ) -> None:
+        if source_meta is None:
+            self.store.update_fingerprint(mapping_id, fingerprint)
             return
+        self.store.refresh_source(
+            mapping_id,
+            fingerprint=fingerprint,
+            source_inode=source_meta.inode,
+            source_mtime=source_meta.mtime,
+            source_mtime_ns=source_meta.mtime_ns,
+            source_size=source_meta.size,
+        )
 
-        fp = self.fingerprint()
+    def _pre_hash_strategy(
+        self,
+        prev,
+        source_meta: _SourceMetadata | None,
+        *,
+        force_hash: bool,
+    ) -> str:
+        policy = self.policy.hash_policy
+        if policy == HashPolicy.ALWAYS:
+            return "prehash"
+        if (
+            prev is not None
+            and source_meta is not None
+            and self._same_source_metadata(prev, source_meta)
+            and not force_hash
+        ):
+            return "reuse"
+        if (
+            policy == HashPolicy.COPY_THEN_HASH
+            and prev is None
+            and source_meta is not None
+        ):
+            return "defer"
+        return "prehash"
 
-        # Fast path: same source + hash + fingerprint already done.
-        if self.store.find_active_by_source_hash_fp(str(src), content_hash, fp) is not None:
-            return
+    def _move_file(self, src: Path, dst: Path) -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.replace(src, dst)
 
-        # Ask mapper for the canonical target. Mapper is policy-free: it
-        # must never look at `dest` filesystem state; just return where this
-        # source *wants* to land.
+    def _staging_target(self, src: Path) -> Path:
+        stage_root = self._ensure_under_dest(self.dest / ".fferyman-staging")
+        return stage_root / f".{src.name}.{uuid4().hex}.tmp"
+
+    def _copy_then_hash_new_file(
+        self,
+        src: Path,
+    ) -> tuple[str, Path, Path] | None:
+        """First sync path for `hash_policy=copy_then_hash`.
+
+        The file is copied to an internal staging area under `dest`, hashed
+        there, then routed through the normal mapper/policy flow once the
+        real content hash is known. This keeps hash-aware mappers working
+        without forcing them to handle `hash_=None`.
+        """
+        staged = self._staging_target(src)
+
+        try:
+            atomic_copy_path(src, staged)
+        except OSError as e:
+            log.error("copy failed %s -> %s: %s", src, staged, e)
+            return None
+
+        try:
+            content_hash = hash_path(staged)
+        except FileNotFoundError:
+            self._cleanup_path(staged)
+            log.error("post-copy hash failed; staged target vanished: %s", staged)
+            return None
+
         try:
             canonical = self.spec.fn(
                 src, self.dest, hash_=content_hash, **self.params
             )
         except Exception:
-            log.exception("mapper %s raised on %s", self.spec.name, src)
-            return
+            self._cleanup_path(staged)
+            log.exception("mapper %s raised on deferred hash for %s", self.spec.name, src)
+            return None
         if canonical is None:
-            return
+            self._cleanup_path(staged)
+            return None
         canonical = Path(canonical)
 
         if not self._validate_target(src, canonical):
-            return
+            self._cleanup_path(staged)
+            return None
 
-        prev = self.store.find_active_by_source(str(src))
-
-        if prev is not None:
-            content_same = prev.content_hash == content_hash
-            target_same = prev.dest_path == str(canonical)
-            if content_same and target_same:
-                # Pure policy/fingerprint drift. Nothing to copy or move.
-                self.store.update_fingerprint(prev.id, fp)
-                return
-            # Either content changed OR mapper now wants a different location
-            # (revision bump / mapper edit). Both go through on_change so the
-            # user's policy decides replace-in-place vs. keep-old-add-new.
-            target = self._apply_on_change(prev, canonical, src)
-        else:
-            target = self._apply_on_conflict(canonical, src)
+        target = self._apply_on_conflict(canonical, src)
         if target is None:
-            return
+            self._cleanup_path(staged)
+            return None
+        if target != staged:
+            try:
+                self._move_file(staged, target)
+            except OSError as e:
+                self._cleanup_path(staged)
+                log.error("retarget move failed %s -> %s: %s", staged, target, e)
+                return None
+        return content_hash, canonical, target
 
-        # Copy atomically.
-        try:
-            atomic_copy_path(src, target)
-        except OSError as e:
-            log.error("copy failed %s -> %s: %s", src, target, e)
+    def _ingest(self, src: Path, *, force_hash: bool = False) -> None:
+        if not src.exists():
             return
+        prev = self.store.find_active_by_source(str(src))
+        source_meta = self._read_source_metadata(src)
+        fp = self.fingerprint()
+
+        strategy = self._pre_hash_strategy(prev, source_meta, force_hash=force_hash)
+        content_hash: str | None = None
+        if strategy == "defer":
+            deferred = self._copy_then_hash_new_file(src)
+            if deferred is None:
+                return
+            content_hash, canonical, target = deferred
+        else:
+            # Fast path for regular files: if inode/size/mtime_ns are unchanged,
+            # reuse the previously computed content hash instead of re-reading the
+            # whole file just to learn "nothing changed".
+            if strategy == "reuse":
+                if prev.fingerprint == fp:
+                    return
+                content_hash = prev.content_hash
+            else:
+                try:
+                    content_hash = hash_path(src)
+                except FileNotFoundError:
+                    return
+
+                # Same content + same fingerprint already seen: no copy needed.
+                # If file metadata drifted (mtime touch, inode swap with same
+                # bytes), refresh the stored metadata so future scans hit the
+                # metadata fast path again.
+                cached = self.store.find_active_by_source_hash_fp(str(src), content_hash, fp)
+                if cached is not None:
+                    self._refresh_source_state(cached.id, fp, source_meta)
+                    return
+
+            # Ask mapper for the canonical target. Mapper is policy-free: it
+            # must never look at `dest` filesystem state; just return where this
+            # source *wants* to land.
+            try:
+                canonical = self.spec.fn(
+                    src, self.dest, hash_=content_hash, **self.params
+                )
+            except Exception:
+                log.exception("mapper %s raised on %s", self.spec.name, src)
+                return
+            if canonical is None:
+                return
+            canonical = Path(canonical)
+
+            if not self._validate_target(src, canonical):
+                return
+
+            if prev is not None:
+                content_same = prev.content_hash == content_hash
+                target_same = prev.dest_path == str(canonical)
+                if content_same and target_same:
+                    # Pure policy/fingerprint drift. Nothing to copy or move.
+                    self._refresh_source_state(prev.id, fp, source_meta)
+                    return
+                # Either content changed OR mapper now wants a different location
+                # (revision bump / mapper edit). Both go through on_change so the
+                # user's policy decides replace-in-place vs. keep-old-add-new.
+                target = self._apply_on_change(prev, canonical, src)
+            else:
+                target = self._apply_on_conflict(canonical, src)
+            if target is None:
+                return
+
+            # Copy atomically.
+            try:
+                atomic_copy_path(src, target)
+            except OSError as e:
+                log.error("copy failed %s -> %s: %s", src, target, e)
+                return
 
         # REPLACE may leave an orphan at prev.dest_path if target moved.
         if (
@@ -382,6 +550,10 @@ class Watch:
             dest_path=str(target),
             is_duplicate=(target != canonical),
             fingerprint=fp,
+            source_inode=source_meta.inode if source_meta is not None else None,
+            source_mtime=source_meta.mtime if source_meta is not None else None,
+            source_mtime_ns=source_meta.mtime_ns if source_meta is not None else None,
+            source_size=source_meta.size if source_meta is not None else None,
         )
         tag = " (duplicate)" if target != canonical else ""
         self.logger.info("mirrored %s -> %s%s", src, target, tag)

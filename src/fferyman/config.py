@@ -9,7 +9,14 @@ import yaml
 from fferyman.core.policy import Policy, policy_from_dict
 
 
-_POLICY_KEYS = {"on_conflict", "on_change", "on_delete", "duplicate_dir", "archive_dir"}
+_POLICY_KEYS = {
+    "on_conflict",
+    "on_change",
+    "on_delete",
+    "hash_policy",
+    "duplicate_dir",
+    "archive_dir",
+}
 
 
 @dataclass

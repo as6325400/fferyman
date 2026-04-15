@@ -137,7 +137,8 @@ def cmd_list(args: argparse.Namespace) -> int:
         p = w.policy
         print(
             f"  - {w.name}: {w.source} -> {w.dest} via {w.algorithm}"
-            f"  [on_conflict={p.on_conflict.value}, on_change={p.on_change.value}, on_delete={p.on_delete.value}]"
+            f"  [on_conflict={p.on_conflict.value}, on_change={p.on_change.value}, "
+            f"on_delete={p.on_delete.value}, hash_policy={p.hash_policy.value}]"
         )
     return 0
 

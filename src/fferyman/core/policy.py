@@ -26,11 +26,19 @@ class OnDelete(str, Enum):
     ARCHIVE = "archive"
 
 
+class HashPolicy(str, Enum):
+    """When to compute content hashes."""
+    ALWAYS = "always"
+    METADATA_FAST_PATH = "metadata_fast_path"
+    COPY_THEN_HASH = "copy_then_hash"
+
+
 @dataclass(frozen=True)
 class Policy:
     on_conflict: OnConflict = OnConflict.DUPLICATE
     on_change: OnChange = OnChange.VERSION
     on_delete: OnDelete = OnDelete.KEEP_DEST
+    hash_policy: HashPolicy = HashPolicy.METADATA_FAST_PATH
     duplicate_dir: str = "duplicate"
     archive_dir: str = "archive"
 
@@ -50,6 +58,7 @@ class Policy:
             f"oc={self.on_conflict.value}"
             f"|oh={self.on_change.value}"
             f"|od={self.on_delete.value}"
+            f"|hp={self.hash_policy.value}"
             f"|dup={self.duplicate_dir}"
             f"|arc={self.archive_dir}"
         )
@@ -58,6 +67,7 @@ class Policy:
 _ON_CONFLICT_VALUES = {e.value for e in OnConflict}
 _ON_CHANGE_VALUES = {e.value for e in OnChange}
 _ON_DELETE_VALUES = {e.value for e in OnDelete}
+_HASH_POLICY_VALUES = {e.value for e in HashPolicy}
 
 
 def _validate_subdir(name: str, field: str) -> str:
@@ -93,6 +103,12 @@ def policy_from_dict(raw: dict) -> Policy:
         on_conflict=_parse("on_conflict", OnConflict, _ON_CONFLICT_VALUES, OnConflict.DUPLICATE),
         on_change=_parse("on_change", OnChange, _ON_CHANGE_VALUES, OnChange.VERSION),
         on_delete=_parse("on_delete", OnDelete, _ON_DELETE_VALUES, OnDelete.KEEP_DEST),
+        hash_policy=_parse(
+            "hash_policy",
+            HashPolicy,
+            _HASH_POLICY_VALUES,
+            HashPolicy.METADATA_FAST_PATH,
+        ),
         duplicate_dir=_validate_subdir(str(raw.get("duplicate_dir", "duplicate")), "duplicate_dir"),
         archive_dir=_validate_subdir(str(raw.get("archive_dir", "archive")), "archive_dir"),
     )

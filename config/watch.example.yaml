@@ -6,6 +6,7 @@ log_level: INFO
 on_conflict: duplicate     # overwrite | duplicate | error
 on_change:   version       # replace | version
 on_delete:   keep_dest     # delete_dest | keep_dest | archive
+hash_policy: metadata_fast_path   # always | metadata_fast_path | copy_then_hash
 duplicate_dir: duplicate
 archive_dir:   archive
 
